@@ -144,7 +144,8 @@ resource "docker_container" "mlflow" {
     "--host", "0.0.0.0",
     "--port", "5000",
     "--backend-store-uri", "postgresql://mlflow:${var.postgres_password}@postgres:5432/mlflow",
-    "--default-artifact-root", "s3://${var.artifact_bucket}/"
+    "--artifacts-destination", "s3://${var.artifact_bucket}/",
+    "--serve-artifacts"
   ]
 
   ports {

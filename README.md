@@ -47,6 +47,19 @@ pip install -r ml/requirements.txt
 
 ## Levantar el stack
 
+Hay dos formas equivalentes. Los **atajos con `make`** son más cómodos; los
+**comandos crudos** te muestran qué hay detrás (apréndelos, son la gracia del práctico).
+
+Con `make` (desde la raíz del repo):
+
+```bash
+make init    # descarga el provider docker
+make up      # levanta el stack dev
+make output  # muestra las URLs
+```
+
+Comando crudo equivalente:
+
 ```bash
 cd terraform
 terraform init
@@ -55,13 +68,16 @@ terraform apply -var-file=dev.tfvars
 terraform output
 ```
 
-`terraform output` te da las URLs. Abre la UI de MLflow y la consola de MinIO
-(usuario/password por defecto: `minioadmin` / `minioadmin`).
+`make output` (o `terraform output`) te da las URLs. Abre la UI de MLflow y la consola de
+MinIO (usuario/password por defecto: `minioadmin` / `minioadmin`).
+
+> Corre `make help` para ver todos los atajos disponibles.
 
 ## Loguear experimentos
 
 ```bash
-cd ..
+make train        # atajo
+# o bien:
 python ml/train.py
 ```
 
@@ -109,6 +125,15 @@ terraform apply -var-file=prod.tfvars
 **Observa:** dos stacks completos coexistiendo (puertos 5001/9010/9011), generados por
 **el mismo código**. Cambió solo el `-var-file`. Recuerda hacer `destroy` de ambos al final.
 
+Con ambos stacks corriendo, entrena contra uno u otro pasando `--tracking-uri`:
+
+```bash
+python ml/train.py --tracking-uri http://localhost:5000   # dev
+python ml/train.py --tracking-uri http://localhost:5001   # prod
+```
+
+(También puedes definir la variable de entorno `MLFLOW_TRACKING_URI` en vez del flag.)
+
 ### TODO 4 — Refactor a módulos *(avanzado)*
 
 Extrae el storage (Postgres + MinIO + bucket) a un módulo `modules/storage` y MLflow a
@@ -126,6 +151,8 @@ Extiende el stack con una pieza más para practicar composición. Opciones:
 ## Al terminar: LIMPIA
 
 ```bash
+make clean   # destruye dev y prod de una vez
+# o bien, uno por uno:
 cd terraform
 terraform destroy -var-file=dev.tfvars
 terraform destroy -var-file=prod.tfvars   # si levantaste prod
