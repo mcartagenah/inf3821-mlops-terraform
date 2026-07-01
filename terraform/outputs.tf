@@ -12,3 +12,8 @@ output "tracking_uri" {
   description = "MLFLOW_TRACKING_URI para el script de training"
   value       = "http://localhost:${var.mlflow_port}"
 }
+
+output "serving_url" {
+  description = "URL de la API REST del modelo servido (si enable_serving = true)"
+  value       = var.enable_serving ? module.serving[0].serving_url : null
+}

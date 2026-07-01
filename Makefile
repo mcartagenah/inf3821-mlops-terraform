@@ -3,7 +3,7 @@
 
 TF = terraform -chdir=terraform
 
-.PHONY: help init up prod-up train smoke output plan down prod-down clean fmt
+.PHONY: help init up prod-up serve-dev serve-prod train smoke output plan down prod-down clean fmt
 
 help:  ## Muestra esta ayuda
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -20,6 +20,12 @@ up:  ## Levanta el stack dev (MLflow + Postgres + MinIO)
 
 prod-up:  ## Levanta un segundo stack aislado (TODO 3: ambientes)
 	$(TF) apply -var-file=prod.tfvars
+
+serve-dev:  ## Levanta el modelo servido en dev (TODO 5, puerto 5002)
+	$(TF) apply -var-file=dev.tfvars -var="enable_serving=true"
+
+serve-prod:  ## Levanta el modelo servido en prod (TODO 5, puerto 5012)
+	$(TF) apply -var-file=prod.tfvars -var="enable_serving=true"
 
 output:  ## Muestra las URLs de MLflow y MinIO
 	$(TF) output
