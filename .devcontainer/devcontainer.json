@@ -1,0 +1,20 @@
+{
+  "name": "MLOps IaC Práctico",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-22.04",
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {},
+    "ghcr.io/devcontainers/features/terraform:1": {}
+  },
+  "forwardPorts": [5000, 9000, 9001],
+  "portsAttributes": {
+    "5000": { "label": "MLflow UI" },
+    "9000": { "label": "MinIO API" },
+    "9001": { "label": "MinIO Console" }
+  },
+  "postCreateCommand": "pip install -r ml/requirements.txt",
+  "customizations": {
+    "vscode": {
+      "extensions": ["hashicorp.terraform"]
+    }
+  }
+}
