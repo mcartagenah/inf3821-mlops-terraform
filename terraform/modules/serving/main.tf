@@ -3,7 +3,7 @@
 # (TODO 5: composición de un servicio nuevo sobre el stack existente)
 # ---------------------------------------------------------------------------
 resource "docker_image" "serving" {
-  name = "mlflow-serving:local"
+  name = "mlflow-serving:${var.environment}"
   build {
     context    = "${path.module}/../../../docker"
     dockerfile = "serving.Dockerfile"

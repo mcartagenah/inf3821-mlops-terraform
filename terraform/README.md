@@ -71,8 +71,8 @@ variable "mlflow_port" {
 Una `variable` es un input configurable: cambia el *valor*, no el *código*. Todo el stack
 (nombres de contenedor, puertos, passwords) se arma con interpolaciones de estas variables —
 nunca hay un puerto o un nombre "hardcodeado" en los módulos. Esto es lo que permite el
-TODO 3: el mismo código, con distintos valores de variable, genera un `dev` y un `prod`
-aislados.
+TODO 3: el mismo código, con distintos valores de variable y distinto workspace de Terraform,
+genera un `dev` y un `prod` aislados.
 
 Observa el flag `sensitive = true` en passwords: no hace que el secreto sea seguro, pero evita
 que Terraform lo imprima en el output de `plan`/`apply`.
@@ -100,16 +100,22 @@ serving_port       = 5012
 ```
 
 Un `.tfvars` es simplemente un archivo que asigna valores a las `variable` declaradas arriba.
-`terraform apply -var-file=dev.tfvars` es la forma de decir "usá estos valores". Como los
-nombres de recursos y redes incluyen `${var.environment}` (ver más abajo), aplicar con
-`dev.tfvars` y con `prod.tfvars` genera **dos stacks completamente independientes** que pueden
-convivir en la misma máquina.
+`terraform apply -var-file=dev.tfvars` es la forma de decir "usá estos valores".
+
+Ojo: un `.tfvars` no crea un state separado. Si aplicas `dev.tfvars` y después `prod.tfvars`
+en el mismo workspace, Terraform interpreta que quieres cambiar el mismo stack de dev a prod.
+Por eso el práctico usa workspaces: `dev` vive en el workspace `default` y `prod` vive en el
+workspace `prod`.
 
 ---
 
 ## 5. `main.tf` raíz — orquesta módulos, no recursos
 
 ```hcl
+resource "terraform_data" "environment_guard" {
+  ...
+}
+
 module "storage" {
   source = "./modules/storage"
 
@@ -137,7 +143,12 @@ Un **módulo** es una carpeta con sus propios `.tf` que se invoca como si fuera 
 Sirve para agrupar piezas que siempre van juntas (aquí: "todo lo de storage" y "todo lo de
 mlflow") detrás de una interfaz simple: variables de entrada, outputs de salida.
 
-Dos cosas para notar:
+Tres cosas para notar:
+
+- **`terraform_data.environment_guard`** — valida que no mezcles un archivo de variables con
+  el workspace equivocado. `dev.tfvars` puede correr en `default`; `prod.tfvars` debe correr
+  en `prod`. Si alguien ejecuta `terraform apply -var-file=prod.tfvars` desde `default`,
+  Terraform corta antes de reutilizar el state de dev.
 
 - **`module.storage.network_name`** — así se lee el *output* de un módulo desde otro. El
   módulo `mlflow` necesita saber a qué red Docker conectarse, pero esa red la crea `storage`.

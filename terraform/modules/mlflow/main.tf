@@ -2,7 +2,7 @@
 # MLflow tracking server (imagen custom con psycopg2 + boto3)
 # ---------------------------------------------------------------------------
 resource "docker_image" "mlflow" {
-  name = "mlflow-server:local"
+  name = "mlflow-server:${var.environment}"
   build {
     context    = "${path.module}/../../../docker"
     dockerfile = "mlflow.Dockerfile"

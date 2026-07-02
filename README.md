@@ -63,6 +63,7 @@ Comando crudo equivalente:
 ```bash
 cd terraform
 terraform init
+terraform workspace select default
 terraform plan  -var-file=dev.tfvars
 terraform apply -var-file=dev.tfvars
 terraform output
@@ -70,6 +71,9 @@ terraform output
 
 `make output` (o `terraform output`) te da las URLs. Abre la UI de MLflow y la consola de
 MinIO (usuario/password por defecto: `minioadmin` / `minioadmin`).
+
+> Importante: `dev` usa el workspace `default` y `prod` usa el workspace `prod`. El `-var-file`
+> cambia valores, pero el aislamiento entre ambientes lo da el state separado por workspace.
 
 > Corre `make help` para ver todos los atajos disponibles.
 
@@ -94,6 +98,7 @@ Resuélvelos en orden. Cada uno dice qué deberías observar si lo lograste.
 
 ```bash
 cd terraform
+terraform workspace select default
 terraform destroy -var-file=dev.tfvars   # todo desaparece
 terraform apply   -var-file=dev.tfvars   # vuelve idéntico
 ```
@@ -108,6 +113,7 @@ Rompe el stack a mano y deja que Terraform lo detecte:
 
 ```bash
 docker stop mlflow-dev
+terraform workspace select default
 terraform plan -var-file=dev.tfvars
 ```
 
@@ -119,11 +125,13 @@ Corre `terraform apply` y vuelve al estado deseado. Esto es *desired-state* vs. 
 Levanta un segundo stack `prod` aislado, en paralelo al `dev`:
 
 ```bash
+terraform workspace select prod || terraform workspace new prod
 terraform apply -var-file=prod.tfvars
 ```
 
 **Observa:** dos stacks completos coexistiendo (puertos 5001/9010/9011), generados por
-**el mismo código**. Cambió solo el `-var-file`. Recuerda hacer `destroy` de ambos al final.
+**el mismo código**. Cambian los valores con `-var-file` y cambia el state con el workspace.
+Recuerda hacer `destroy` de ambos al final.
 
 Con ambos stacks corriendo, entrena contra uno u otro pasando `--tracking-uri`:
 
@@ -220,9 +228,11 @@ Extiende el stack con una pieza más para practicar composición. Opciones:
 > `serving.Dockerfile`, fuerza la reconstrucción:
 >
 > ```bash
-> docker rmi -f mlflow-serving:local
+> docker rmi -f mlflow-serving:dev
 > terraform apply -var-file=dev.tfvars -var="enable_serving=true" -replace='module.serving[0].docker_container.serving'
 > ```
+>
+> Para `prod`, usa `mlflow-serving:prod` desde el workspace `prod`.
 
 ---
 
@@ -232,7 +242,9 @@ Extiende el stack con una pieza más para practicar composición. Opciones:
 make clean   # destruye dev y prod de una vez
 # o bien, uno por uno:
 cd terraform
+terraform workspace select default
 terraform destroy -var-file=dev.tfvars
+terraform workspace select prod
 terraform destroy -var-file=prod.tfvars   # si levantaste prod
 ```
 

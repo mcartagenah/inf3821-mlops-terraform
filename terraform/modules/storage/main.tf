@@ -20,7 +20,8 @@ resource "docker_volume" "minio_data" {
 # PostgreSQL — backend store de MLflow
 # ---------------------------------------------------------------------------
 resource "docker_image" "postgres" {
-  name = "postgres:16-alpine"
+  name         = "postgres:16-alpine"
+  keep_locally = true
 }
 
 resource "docker_container" "postgres" {
@@ -55,7 +56,8 @@ resource "docker_container" "postgres" {
 # MinIO — artifact store S3-compatible
 # ---------------------------------------------------------------------------
 resource "docker_image" "minio" {
-  name = "minio/minio:latest"
+  name         = "minio/minio:latest"
+  keep_locally = true
 }
 
 resource "docker_container" "minio" {
@@ -92,7 +94,8 @@ resource "docker_container" "minio" {
 # Init: crea el bucket de artefactos con el cliente mc (corre una vez y muere)
 # ---------------------------------------------------------------------------
 resource "docker_image" "mc" {
-  name = "minio/mc:latest"
+  name         = "minio/mc:latest"
+  keep_locally = true
 }
 
 resource "docker_container" "create_bucket" {

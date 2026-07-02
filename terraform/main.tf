@@ -1,3 +1,23 @@
+locals {
+  workspace_matches_environment = terraform.workspace == var.environment || (
+    terraform.workspace == "default" && var.environment == "dev"
+  )
+}
+
+resource "terraform_data" "environment_guard" {
+  input = {
+    environment = var.environment
+    workspace   = terraform.workspace
+  }
+
+  lifecycle {
+    precondition {
+      condition     = local.workspace_matches_environment
+      error_message = "El workspace de Terraform debe coincidir con var.environment. Usa el workspace default o dev para dev, y el workspace prod para prod."
+    }
+  }
+}
+
 module "storage" {
   source = "./modules/storage"
 
