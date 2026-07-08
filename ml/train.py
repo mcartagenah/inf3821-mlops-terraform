@@ -36,7 +36,9 @@ for c in [0.1, 1.0, 10.0]:
 
         mlflow.log_param("C", c)
         mlflow.log_metric("accuracy", acc)
-        mlflow.sklearn.log_model(model, "model")  # el artefacto se guarda en MinIO
+        # el artefacto se guarda en MinIO y queda registrado en el Model Registry
+        # (TODO 5: el módulo de serving sirve una versión registrada por nombre)
+        mlflow.sklearn.log_model(model, "model", registered_model_name="iris-clf")
         print(f"C={c}  accuracy={acc:.3f}")
 
 print("\nListo. Revisa los runs en la UI de MLflow y el bucket en la consola de MinIO.")

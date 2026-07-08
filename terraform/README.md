@@ -10,12 +10,16 @@ para explicar el código, no para correrlo (para eso está el `README.md` de la 
 
 ```
 terraform/
-├── versions.tf     # qué Terraform y qué provider necesitamos
-├── variables.tf    # "parámetros" del stack (puertos, passwords, nombres)
-├── main.tf         # los recursos: red, volúmenes, Postgres, MinIO, MLflow
-├── outputs.tf      # qué le mostramos al usuario al final de un apply
-├── dev.tfvars      # valores concretos para el ambiente dev
-└── prod.tfvars     # valores concretos para el ambiente prod
+├── versions.tf          # qué Terraform y qué provider necesitamos
+├── variables.tf         # "parámetros" del stack (puertos, passwords, nombres)
+├── main.tf              # arma el stack invocando módulos
+├── outputs.tf           # qué le mostramos al usuario al final de un apply
+├── dev.tfvars           # valores concretos para el ambiente dev
+├── prod.tfvars          # valores concretos para el ambiente prod
+└── modules/
+    ├── storage/         # Postgres + MinIO + bucket
+    ├── mlflow/          # el tracking server
+    └── serving/         # (TODO 5) sirve un modelo registrado
 ```
 
 La idea de fondo: **todo lo que hoy es "infraestructura"** (contenedores, redes, volúmenes)
@@ -66,9 +70,9 @@ variable "mlflow_port" {
 
 Una `variable` es un input configurable: cambia el *valor*, no el *código*. Todo el stack
 (nombres de contenedor, puertos, passwords) se arma con interpolaciones de estas variables —
-nunca hay un puerto o un nombre "hardcodeado" en `main.tf`. Esto es lo que permite el
-TODO 3: el mismo código, con distintos valores de variable, genera un `dev` y un `prod`
-aislados.
+nunca hay un puerto o un nombre "hardcodeado" en los módulos. Esto es lo que permite el
+TODO 3: el mismo código, con distintos valores de variable y distinto workspace de Terraform,
+genera un `dev` y un `prod` aislados.
 
 Observa el flag `sensitive = true` en passwords: no hace que el secreto sea seguro, pero evita
 que Terraform lo imprima en el output de `plan`/`apply`.
@@ -83,6 +87,7 @@ environment        = "dev"
 mlflow_port        = 5000
 minio_api_port     = 9000
 minio_console_port = 9001
+serving_port       = 5002
 ```
 
 ```hcl
@@ -91,55 +96,121 @@ environment        = "prod"
 mlflow_port        = 5001
 minio_api_port     = 9010
 minio_console_port = 9011
+serving_port       = 5012
 ```
 
 Un `.tfvars` es simplemente un archivo que asigna valores a las `variable` declaradas arriba.
-`terraform apply -var-file=dev.tfvars` es la forma de decir "usa estos valores". Como los
-nombres de recursos y redes incluyen `${var.environment}` (ver más abajo), aplicar con
-`dev.tfvars` y con `prod.tfvars` genera **dos stacks completamente independientes** que pueden
-convivir en la misma máquina.
+`terraform apply -var-file=dev.tfvars` es la forma de decir "usá estos valores".
+
+Ojo: un `.tfvars` no crea un state separado. Si aplicas `dev.tfvars` y después `prod.tfvars`
+en el mismo workspace, Terraform interpreta que quieres cambiar el mismo stack de dev a prod.
+Por eso el práctico usa workspaces: `dev` vive en el workspace `default` y `prod` vive en el
+workspace `prod`.
 
 ---
 
-## 5. `main.tf` — los recursos, uno por uno
+## 5. `main.tf` raíz — orquesta módulos, no recursos
 
-### La red
+```hcl
+resource "terraform_data" "environment_guard" {
+  ...
+}
+
+module "storage" {
+  source = "./modules/storage"
+
+  environment         = var.environment
+  minio_api_port      = var.minio_api_port
+  minio_console_port  = var.minio_console_port
+  minio_root_user     = var.minio_root_user
+  minio_root_password = var.minio_root_password
+  postgres_password   = var.postgres_password
+  artifact_bucket     = var.artifact_bucket
+}
+
+module "mlflow" {
+  source = "./modules/mlflow"
+
+  environment         = var.environment
+  network_name        = module.storage.network_name
+  mlflow_port         = var.mlflow_port
+  ...
+  depends_on = [module.storage]
+}
+```
+
+Un **módulo** es una carpeta con sus propios `.tf` que se invoca como si fuera un recurso más.
+Sirve para agrupar piezas que siempre van juntas (aquí: "todo lo de storage" y "todo lo de
+mlflow") detrás de una interfaz simple: variables de entrada, outputs de salida.
+
+Tres cosas para notar:
+
+- **`terraform_data.environment_guard`** — valida que no mezcles un archivo de variables con
+  el workspace equivocado. `dev.tfvars` puede correr en `default`; `prod.tfvars` debe correr
+  en `prod`. Si alguien ejecuta `terraform apply -var-file=prod.tfvars` desde `default`,
+  Terraform corta antes de reutilizar el state de dev.
+
+- **`module.storage.network_name`** — así se lee el *output* de un módulo desde otro. El
+  módulo `mlflow` necesita saber a qué red Docker conectarse, pero esa red la crea `storage`.
+  Este es el mecanismo de conexión entre módulos: outputs de uno → variables de otro.
+- **`depends_on = [module.storage]`** — Terraform normalmente infiere el orden por las
+  referencias (`module.storage.network_name` ya implica una dependencia). Este `depends_on`
+  explícito refuerza que *todo* storage (incluyendo el contenedor que crea el bucket) exista
+  antes de levantar MLflow, no solo la red.
+
+El módulo `serving` es opcional:
+
+```hcl
+module "serving" {
+  count  = var.enable_serving ? 1 : 0
+  source = "./modules/serving"
+  ...
+}
+```
+
+`count = 0 o 1` es el patrón estándar para "recurso condicional" en Terraform (no existe un
+`if` de verdad). Con `enable_serving = false` (el default), este módulo directamente no
+existe — por eso el `main.tf` raíz sigue siendo, en la práctica, "dos módulos" como pide el
+TODO 4, y el tercero aparece solo cuando se lo pide explícitamente.
+
+### Los bloques `moved` — refactor sin destruir nada
+
+```hcl
+moved {
+  from = docker_container.mlflow
+  to   = module.mlflow.docker_container.mlflow
+}
+```
+
+Cuando un recurso se "muda" de lugar en el código (aquí: de la raíz a un módulo), Terraform lo
+ve como una entidad distinta *a menos que le digas lo contrario* — porque el nombre completo
+(`docker_container.mlflow` vs `module.mlflow.docker_container.mlflow`) es parte de su
+identidad en el **state**. Sin `moved`, un `plan` después de este refactor mostraría "destruir
++ crear" para cada recurso. El bloque `moved` le dice a Terraform "es el mismo recurso, solo
+actualiza la dirección en el state" — el `plan` da limpio, sin tocar la infraestructura real.
+Este es el mecanismo detrás de la promesa del TODO 4: *"el plan no debe cambiar nada de
+infra — solo reorganizaste el código"*.
+
+---
+
+## 6. Dentro de un módulo: `modules/storage/main.tf`
 
 ```hcl
 resource "docker_network" "mlops" {
   name = "mlops-${var.environment}"
 }
-```
 
-Un `resource` es la unidad mínima: "quiero que exista esto". El *tipo* (`docker_network`) lo
-define el provider; el *nombre local* (`mlops`) es solo una etiqueta para referenciarlo dentro
-del código — no es el nombre real del recurso en Docker (ese lo fija el argumento
-`name = ...`). Esta red es lo que le permite a los contenedores (Postgres, MinIO, MLflow)
-verse entre sí por nombre.
-
-### Los volúmenes
-
-```hcl
 resource "docker_volume" "postgres_data" {
   name = "mlops-pg-${var.environment}"
 }
-
-resource "docker_volume" "minio_data" {
-  name = "mlops-minio-${var.environment}"
-}
 ```
 
-Persistencia: sin esto, cada `terraform apply`/`destroy` perdería los datos de Postgres
-(metadata de runs) y de MinIO (artefactos) apenas se recrea el contenedor. El TODO 1 justo
-pregunta sobre esto: ¿qué sobrevive a un `destroy` + `apply` y qué no?
-
-### Postgres — backend store de MLflow
+Un `resource` es la unidad mínima: "quiero que exista esto". El *tipo* (`docker_network`,
+`docker_volume`) lo define el provider; el *nombre local* (`mlops`, `postgres_data`) es solo
+una etiqueta para referenciarlo dentro del código — no es el nombre real del recurso en
+Docker (ese lo fija el argumento `name = ...`).
 
 ```hcl
-resource "docker_image" "postgres" {
-  name = "postgres:16-alpine"
-}
-
 resource "docker_container" "postgres" {
   name  = "postgres-${var.environment}"
   image = docker_image.postgres.image_id
@@ -171,183 +242,143 @@ resource "docker_container" "postgres" {
 
 Cosas para señalar en clase:
 
-- **`docker_image.postgres.image_id`** — referenciar un atributo de *otro* recurso es cómo
-  Terraform arma el grafo de dependencias automáticamente: como este contenedor usa ese
-  atributo, Terraform sabe que primero tiene que bajar la imagen, después crear el contenedor.
-  Nadie escribió "primero A, después B" — surge solo de la referencia.
+- **`docker_image.postgres.image_id`** — referenciar un atributo de *otro* recurso (`image_id`
+  de la imagen que se declaró arriba) es cómo Terraform arma el grafo de dependencias
+  automáticamente: como este contenedor usa ese atributo, Terraform sabe que primero tiene que
+  bajar/construir la imagen, después crear el contenedor.
 - **`aliases = ["postgres"]`** — dentro de la red Docker, cualquier otro contenedor puede
   resolver este servicio por el nombre `postgres` (DNS interno de Docker), sin importar cómo
-  se llame el contenedor real (`postgres-dev`, `postgres-prod`, etc.). Por eso el
-  `backend-store-uri` de MLflow, más abajo, apunta a `postgres:5432` y no a
-  `postgres-dev:5432`.
-- **`healthcheck`** — no es una construcción de Terraform, es un argumento que el *provider*
-  de Docker expone porque Docker mismo soporta healthchecks. Terraform simplemente lo declara;
-  el chequeo real lo corre el daemon de Docker.
-
-### MinIO — artifact store S3-compatible
-
-```hcl
-resource "docker_container" "minio" {
-  name    = "minio-${var.environment}"
-  image   = docker_image.minio.image_id
-  command = ["server", "/data", "--console-address", ":9001"]
-  ...
-  ports {
-    internal = 9000
-    external = var.minio_api_port
-  }
-  ports {
-    internal = 9001
-    external = var.minio_console_port
-  }
-  ...
-}
-```
-
-Dos bloques `ports` porque MinIO expone dos cosas distintas: la API S3 (9000, la que usa
-MLflow para guardar artefactos) y la consola web (9001, la que abres en el navegador).
-`internal` es el puerto *dentro* del contenedor (fijo, lo define la imagen de MinIO);
-`external` es el puerto en tu máquina (configurable por variable — así `dev` y `prod` no
-pisan el mismo puerto).
-
-### El "job" que crea el bucket
+  se llame el contenedor real. Por eso el `backend-store-uri` de MLflow apunta a
+  `postgres:5432` y no a `postgres-dev:5432`.
+- **`healthcheck`** — no es una construcción de Terraform, es un argumento que el provider de
+  Docker expone porque Docker mismo soporta healthchecks. Terraform simplemente lo declara; el
+  chequeo real lo corre el daemon de Docker.
+- **El bucket "job"**:
 
 ```hcl
 resource "docker_container" "create_bucket" {
   name     = "create-bucket-${var.environment}"
-  image    = docker_image.mc.image_id
   must_run = false # es un job, no un servicio permanente
   restart  = "no"
-
-  entrypoint = ["/bin/sh", "-c"]
-  command = [
-    "until mc alias set local http://minio:9000 ${var.minio_root_user} ${var.minio_root_password}; do sleep 2; done && mc mb -p local/${var.artifact_bucket} || true"
-  ]
-
+  ...
   depends_on = [docker_container.minio]
 }
 ```
 
-`must_run = false` + `restart = "no"` modelan un contenedor que corre una vez y termina (crea
-el bucket con `mc mb`) — no un servicio de larga duración. Es la forma declarativa de un "init
-job", un patrón común en infra de contenedores. El `until ...; do sleep 2; done` de adentro
-existe porque, aunque Terraform ya garantizó que el contenedor de MinIO *existe*
-(`depends_on`), no garantiza que el *proceso* adentro ya esté aceptando conexiones — esa
-diferencia (existencia vs. disponibilidad) hay que resolverla a mano.
-
-### MLflow — el tracking server
-
-```hcl
-resource "docker_image" "mlflow" {
-  name = "mlflow-server:local"
-  build {
-    context    = "${path.module}/../docker"
-    dockerfile = "mlflow.Dockerfile"
-  }
-}
-
-resource "docker_container" "mlflow" {
-  name  = "mlflow-${var.environment}"
-  image = docker_image.mlflow.image_id
-
-  env = [
-    "MLFLOW_S3_ENDPOINT_URL=http://minio:9000",
-    "AWS_ACCESS_KEY_ID=${var.minio_root_user}",
-    "AWS_SECRET_ACCESS_KEY=${var.minio_root_password}"
-  ]
-
-  command = [
-    "mlflow", "server",
-    "--host", "0.0.0.0",
-    "--port", "5000",
-    "--backend-store-uri", "postgresql://mlflow:${var.postgres_password}@postgres:5432/mlflow",
-    "--artifacts-destination", "s3://${var.artifact_bucket}/",
-    "--serve-artifacts"
-  ]
-
-  ports {
-    internal = 5000
-    external = var.mlflow_port
-  }
-
-  depends_on = [
-    docker_container.postgres,
-    docker_container.create_bucket
-  ]
-}
-```
-
-Observa que esta imagen no viene de Docker Hub: `build { context = ..., dockerfile = ... }` le
-dice a Terraform que la *construya* localmente a partir de `docker/mlflow.Dockerfile` antes
-de poder crear el contenedor. Es la misma idea de "imagen como recurso declarado" que con
-Postgres o MinIO, solo que aquí el "de dónde sale la imagen" es un build, no un pull.
-
-El `depends_on` explícito es necesario porque, aunque MLflow *usa* `postgres` y `minio` por
-nombre DNS dentro de sus argumentos `command`/`env` (strings, no referencias de Terraform),
-Terraform no puede inferir esa dependencia de un string interpolado a mano — hay que
-declararla.
+  `must_run = false` + `restart = "no"` modelan un contenedor que corre una vez y termina
+  (crea el bucket con `mc mb`) — no un servicio de larga duración. Es la forma declarativa de
+  un "init job", un patrón común en infra de contenedores.
 
 ---
 
-## 6. `outputs.tf` — la fachada hacia el usuario
+## 7. Outputs de módulo: la interfaz hacia afuera
 
 ```hcl
+# modules/storage/outputs.tf
+output "network_name" {
+  description = "Nombre de la red docker compartida por el stack"
+  value       = docker_network.mlops.name
+}
+```
+
+Un módulo solo expone lo que declara en sus `outputs.tf`. Todo lo demás (los recursos
+`docker_volume`, `docker_container.create_bucket`, etc.) es un detalle interno que el resto
+del código ni ve. Esto es encapsulación: `main.tf` raíz solo necesita saber que existe
+`module.storage.network_name`, no cómo se construyó esa red.
+
+Mismo patrón en la raíz, hacia el usuario humano:
+
+```hcl
+# terraform/outputs.tf
 output "tracking_uri" {
   description = "MLFLOW_TRACKING_URI para el script de training"
   value       = "http://localhost:${var.mlflow_port}"
 }
 ```
 
-Un `output` es lo que ves al correr `terraform output` (o `make output`) después de un
-`apply`: la "fachada" pensada para quien usa el stack (URLs a copiar y pegar), no el detalle
-de implementación de cómo se armó cada contenedor.
+Esto es lo que ves al correr `terraform output` (o `make output`): la "fachada" pensada para
+quien usa el stack, no para quien lo programa.
 
 ---
 
-## 7. El grafo completo, de un vistazo
+## 8. El módulo `serving` — composición condicional (TODO 5)
 
-```
-        docker_network.mlops
-                │
-    ┌───────────┼───────────────┐
-    │           │               │
-docker_volume  docker_volume    │
-.postgres_data .minio_data      │
-    │           │               │
-    ▼           ▼               │
-docker_container   docker_container
-   .postgres          .minio
-    │                   │
-    │                   ▼
-    │           docker_container.create_bucket
-    │                   │
-    └─────────┬─────────┘
-              ▼
-     docker_container.mlflow
-     (depends_on postgres +
-      create_bucket; habla
-      con ambos por DNS
-      interno de la red)
+```hcl
+# modules/serving/main.tf
+resource "docker_container" "serving" {
+  ...
+  command = [
+    "mlflow", "models", "serve",
+    "-m", "models:/${var.model_name}/${var.model_version}",
+    "--host", "0.0.0.0",
+    "--port", "5000",
+    "--env-manager", "local"
+  ]
+  ports {
+    internal = 5000
+    external = var.serving_port
+  }
+}
 ```
 
-Cada flecha sólida (volúmenes → contenedor, imagen → contenedor) es una dependencia que
-Terraform infiere solo de las referencias (`docker_volume.postgres_data.name`,
-`docker_image.postgres.image_id`). Las flechas hacia `create_bucket` y `mlflow` incluyen,
-además, `depends_on` explícitos porque esas dependencias pasan por strings (URLs, DNS
-interno) que Terraform no puede leer automáticamente.
+Este módulo no inventa nada nuevo respecto a `storage`/`mlflow`: mismo patrón (imagen +
+contenedor + red + puerto). Lo interesante pedagógicamente es *cómo se conecta* con el resto
+del stack sin acoplarse a su implementación:
+
+- Recibe `network_name` (de `module.storage`) para entrar a la misma red Docker.
+- Recibe `tracking_uri = "http://mlflow:5000"` (nombre DNS interno, no `localhost`) para poder
+  resolver `models:/iris-clf/1` contra el Model Registry que corre en `module.mlflow`.
+- Recibe las credenciales de MinIO para poder *descargar* el artefacto del modelo desde el
+  bucket S3-compatible.
+
+Y en la raíz, es *opcional* vía `count`:
+
+```hcl
+module "serving" {
+  count = var.enable_serving ? 1 : 0
+  ...
+}
+```
+
+Por eso, para leer su output hay que indexar el módulo como si fuera una lista:
+
+```hcl
+output "serving_url" {
+  value = var.enable_serving ? module.serving[0].serving_url : null
+}
+```
+
+`module.serving` con `count` es una **lista de instancias** (de 0 o 1 elemento aquí), no una
+instancia única — de ahí el `[0]`.
 
 ---
 
-## 8. Preguntas para guiar la clase
+## 9. El grafo completo, de un vistazo
 
-- ¿Por qué el healthcheck de Postgres no genera, por sí solo, que Terraform *espere* a que
-  Postgres esté healthy antes de arrancar MLflow? (Pista: Terraform sabe que el contenedor
-  existe, no necesariamente que el proceso adentro ya está listo — mira el `until` del job de
-  `create_bucket` para ver cómo se resuelve ese mismo problema a mano.)
-- Si cambio `artifact_bucket` en `variables.tf`, ¿qué recursos de `main.tf` se recrean?
-  ¿Cuáles no?
-- ¿Qué pasa si borro el `depends_on` de `docker_container.mlflow`? ¿Alcanzarían las
-  referencias implícitas (imagen, red) para que el orden siga siendo correcto?
-- Corriendo `dev.tfvars` y `prod.tfvars` en paralelo (TODO 3): ¿qué recursos son
-  *verdaderamente* independientes entre ambos stacks, y cuáles compartirían algo si no fuera
-  por `${var.environment}` en cada nombre?
+```
+                    var.environment / *.tfvars
+                              │
+                ┌─────────────┴─────────────┐
+                │                           │
+         module.storage              (variables compartidas)
+        (red, volúmenes,                    │
+         postgres, minio,                   │
+         bucket init)                       │
+                │ network_name               │
+                ▼                           │
+         module.mlflow  ◄────────────────────┘
+        (tracking server,
+         usa postgres +
+         minio por DNS)
+                │ tracking_uri (interno)
+                ▼
+      module.serving [count = 0|1]
+     (sirve un modelo del
+      Model Registry vía
+      mlflow models serve)
+```
+
+Cada flecha es una dependencia real en el grafo de Terraform: no está escrita a mano en
+ningún lado ("primero storage, después mlflow"), surge de que un módulo *usa* el output de
+otro. Es la misma lógica de `docker_image.X.image_id` dentro de un módulo, pero a nivel de
+módulos completos.

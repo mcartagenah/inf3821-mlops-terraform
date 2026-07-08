@@ -47,3 +47,30 @@ variable "artifact_bucket" {
   type        = string
   default     = "mlflow-artifacts"
 }
+
+# ---------------------------------------------------------------------------
+# TODO 5 — Model serving
+# ---------------------------------------------------------------------------
+variable "enable_serving" {
+  description = "Si true, levanta el módulo de serving (TODO 5)"
+  type        = bool
+  default     = false
+}
+
+variable "serving_port" {
+  description = "Puerto host para la API REST del modelo servido"
+  type        = number
+  default     = 5002
+}
+
+variable "serving_model_name" {
+  description = "Nombre del modelo registrado en el Model Registry a servir"
+  type        = string
+  default     = "iris-clf"
+}
+
+variable "serving_model_version" {
+  description = "Versión del modelo registrado a servir (correr train.py primero para generarla)"
+  type        = string
+  default     = "1"
+}

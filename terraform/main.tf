@@ -1,160 +1,121 @@
-# ---------------------------------------------------------------------------
-# Red compartida: todos los contenedores se ven entre sí por nombre de servicio
-# ---------------------------------------------------------------------------
-resource "docker_network" "mlops" {
-  name = "mlops-${var.environment}"
+locals {
+  workspace_matches_environment = terraform.workspace == var.environment || (
+    terraform.workspace == "default" && var.environment == "dev"
+  )
 }
 
-# ---------------------------------------------------------------------------
-# Volúmenes: persistencia de metadata (postgres) y artefactos (minio)
-# ---------------------------------------------------------------------------
-resource "docker_volume" "postgres_data" {
-  name = "mlops-pg-${var.environment}"
-}
-
-resource "docker_volume" "minio_data" {
-  name = "mlops-minio-${var.environment}"
-}
-
-# ---------------------------------------------------------------------------
-# PostgreSQL — backend store de MLflow
-# ---------------------------------------------------------------------------
-resource "docker_image" "postgres" {
-  name = "postgres:16-alpine"
-}
-
-resource "docker_container" "postgres" {
-  name  = "postgres-${var.environment}"
-  image = docker_image.postgres.image_id
-
-  env = [
-    "POSTGRES_USER=mlflow",
-    "POSTGRES_PASSWORD=${var.postgres_password}",
-    "POSTGRES_DB=mlflow"
-  ]
-
-  networks_advanced {
-    name    = docker_network.mlops.name
-    aliases = ["postgres"]
+resource "terraform_data" "environment_guard" {
+  input = {
+    environment = var.environment
+    workspace   = terraform.workspace
   }
 
-  volumes {
-    volume_name    = docker_volume.postgres_data.name
-    container_path = "/var/lib/postgresql/data"
-  }
-
-  healthcheck {
-    test     = ["CMD-SHELL", "pg_isready -U mlflow"]
-    interval = "5s"
-    timeout  = "3s"
-    retries  = 5
+  lifecycle {
+    precondition {
+      condition     = local.workspace_matches_environment
+      error_message = "El workspace de Terraform debe coincidir con var.environment. Usa el workspace default o dev para dev, y el workspace prod para prod."
+    }
   }
 }
 
-# ---------------------------------------------------------------------------
-# MinIO — artifact store S3-compatible
-# ---------------------------------------------------------------------------
-resource "docker_image" "minio" {
-  name = "minio/minio:latest"
+module "storage" {
+  source = "./modules/storage"
+
+  environment         = var.environment
+  minio_api_port      = var.minio_api_port
+  minio_console_port  = var.minio_console_port
+  minio_root_user     = var.minio_root_user
+  minio_root_password = var.minio_root_password
+  postgres_password   = var.postgres_password
+  artifact_bucket     = var.artifact_bucket
 }
 
-resource "docker_container" "minio" {
-  name    = "minio-${var.environment}"
-  image   = docker_image.minio.image_id
-  command = ["server", "/data", "--console-address", ":9001"]
+module "mlflow" {
+  source = "./modules/mlflow"
 
-  env = [
-    "MINIO_ROOT_USER=${var.minio_root_user}",
-    "MINIO_ROOT_PASSWORD=${var.minio_root_password}"
-  ]
+  environment         = var.environment
+  network_name        = module.storage.network_name
+  mlflow_port         = var.mlflow_port
+  postgres_password   = var.postgres_password
+  minio_root_user     = var.minio_root_user
+  minio_root_password = var.minio_root_password
+  artifact_bucket     = var.artifact_bucket
 
-  networks_advanced {
-    name    = docker_network.mlops.name
-    aliases = ["minio"]
-  }
-
-  ports {
-    internal = 9000
-    external = var.minio_api_port
-  }
-  ports {
-    internal = 9001
-    external = var.minio_console_port
-  }
-
-  volumes {
-    volume_name    = docker_volume.minio_data.name
-    container_path = "/data"
-  }
+  depends_on = [module.storage]
 }
 
-# ---------------------------------------------------------------------------
-# Init: crea el bucket de artefactos con el cliente mc (corre una vez y muere)
-# ---------------------------------------------------------------------------
-resource "docker_image" "mc" {
-  name = "minio/mc:latest"
-}
+module "serving" {
+  count  = var.enable_serving ? 1 : 0
+  source = "./modules/serving"
 
-resource "docker_container" "create_bucket" {
-  name     = "create-bucket-${var.environment}"
-  image    = docker_image.mc.image_id
-  must_run = false # es un job, no un servicio permanente
-  restart  = "no"
+  environment         = var.environment
+  network_name        = module.storage.network_name
+  serving_port        = var.serving_port
+  tracking_uri        = "http://mlflow:5000"
+  model_name          = var.serving_model_name
+  model_version       = var.serving_model_version
+  minio_root_user     = var.minio_root_user
+  minio_root_password = var.minio_root_password
 
-  networks_advanced {
-    name = docker_network.mlops.name
-  }
-
-  entrypoint = ["/bin/sh", "-c"]
-  command = [
-    "until mc alias set local http://minio:9000 ${var.minio_root_user} ${var.minio_root_password}; do sleep 2; done && mc mb -p local/${var.artifact_bucket} || true"
-  ]
-
-  depends_on = [docker_container.minio]
+  depends_on = [module.mlflow]
 }
 
 # ---------------------------------------------------------------------------
-# MLflow tracking server (imagen custom con psycopg2 + boto3)
+# TODO 4 — moved blocks: si ya tenías un stack aplicado con el main.tf plano
+# (pre-refactor), estos mapeos evitan que Terraform destruya y recree todo
+# solo por haber movido los recursos a módulos.
 # ---------------------------------------------------------------------------
-resource "docker_image" "mlflow" {
-  name = "mlflow-server:local"
-  build {
-    context    = "${path.module}/../docker"
-    dockerfile = "mlflow.Dockerfile"
-  }
+moved {
+  from = docker_network.mlops
+  to   = module.storage.docker_network.mlops
 }
 
-resource "docker_container" "mlflow" {
-  name  = "mlflow-${var.environment}"
-  image = docker_image.mlflow.image_id
+moved {
+  from = docker_volume.postgres_data
+  to   = module.storage.docker_volume.postgres_data
+}
 
-  env = [
-    "MLFLOW_S3_ENDPOINT_URL=http://minio:9000",
-    "AWS_ACCESS_KEY_ID=${var.minio_root_user}",
-    "AWS_SECRET_ACCESS_KEY=${var.minio_root_password}"
-  ]
+moved {
+  from = docker_volume.minio_data
+  to   = module.storage.docker_volume.minio_data
+}
 
-  networks_advanced {
-    name    = docker_network.mlops.name
-    aliases = ["mlflow"]
-  }
+moved {
+  from = docker_image.postgres
+  to   = module.storage.docker_image.postgres
+}
 
-  command = [
-    "mlflow", "server",
-    "--host", "0.0.0.0",
-    "--port", "5000",
-    "--backend-store-uri", "postgresql://mlflow:${var.postgres_password}@postgres:5432/mlflow",
-    "--artifacts-destination", "s3://${var.artifact_bucket}/",
-    "--serve-artifacts"
-  ]
+moved {
+  from = docker_container.postgres
+  to   = module.storage.docker_container.postgres
+}
 
-  ports {
-    internal = 5000
-    external = var.mlflow_port
-  }
+moved {
+  from = docker_image.minio
+  to   = module.storage.docker_image.minio
+}
 
-  depends_on = [
-    docker_container.postgres,
-    docker_container.create_bucket
-  ]
+moved {
+  from = docker_container.minio
+  to   = module.storage.docker_container.minio
+}
+
+moved {
+  from = docker_image.mc
+  to   = module.storage.docker_image.mc
+}
+
+moved {
+  from = docker_container.create_bucket
+  to   = module.storage.docker_container.create_bucket
+}
+
+moved {
+  from = docker_image.mlflow
+  to   = module.mlflow.docker_image.mlflow
+}
+
+moved {
+  from = docker_container.mlflow
+  to   = module.mlflow.docker_container.mlflow
 }

@@ -1,3 +1,9 @@
-mlflow>=2.14,<3
-scikit-learn
+# Pineado para que el modelo se entrene y se sirva con el MISMO entorno.
+# Si cambias estas versiones, actualiza también docker/serving.Dockerfile
+# (el contenedor de serving corre con --env-manager local y debe coincidir
+# con las versiones con las que se serializó el modelo).
+mlflow==2.22.5
+scikit-learn==1.7.2
+numpy==2.2.6
+scipy==1.15.3
 boto3
